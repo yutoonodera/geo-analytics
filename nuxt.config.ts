@@ -16,4 +16,5 @@ export default defineNuxtConfig({
       exclude: ["/", "/login", "/confirm"],
     },
   },
+  css: ["leaflet/dist/leaflet.css"],
 });

@@ -8,13 +8,22 @@ export default defineNuxtConfig({
     "@nuxtjs/tailwindcss",
   ],
 
+  // ✅ サーバー専用の環境変数（クライアントに漏れない）
+  runtimeConfig: {
+    supabaseUrl: process.env.SUPABASE_URL,
+    supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
+    workerToken: process.env.WORKER_TOKEN,
+    public: {},
+  },
+
   supabase: {
     redirectOptions: {
       login: "/login",
       callback: "/confirm",
-      // ★ここが重要：ログイン関連は必ず除外
-      exclude: ["/", "/login", "/confirm"],
+      // ✅ API は必ず除外（重要）
+      exclude: ["/", "/login", "/confirm", "/api/**"],
     },
   },
+
   css: ["leaflet/dist/leaflet.css"],
-});
+})

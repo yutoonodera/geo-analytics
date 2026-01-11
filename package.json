@@ -13,6 +13,7 @@
     "@nuxtjs/supabase": "^2.0.3",
     "@supabase/supabase-js": "^2.90.0",
     "leaflet": "^1.9.4",
+    "leaflet.markercluster": "^1.5.3",
     "nuxt": "^4.2.2",
     "papaparse": "^5.5.3",
     "undici": "^7.18.2",

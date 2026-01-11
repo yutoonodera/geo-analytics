@@ -25,5 +25,8 @@ export default defineNuxtConfig({
     },
   },
 
-  css: ["leaflet/dist/leaflet.css"],
+  css: ["leaflet/dist/leaflet.css",
+        "leaflet.markercluster/dist/MarkerCluster.css",
+        "leaflet.markercluster/dist/MarkerCluster.Default.css",
+  ],
 })

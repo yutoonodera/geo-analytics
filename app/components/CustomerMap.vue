@@ -1,19 +1,27 @@
 <script setup lang="ts">
 import L from "leaflet"
+import "leaflet.markercluster"
 import { onMounted, ref } from "vue"
 
 type Sex = "male" | "female"
 type Customer = {
   id: number
   address: string | null
-  birth: string // "YYYY-MM-DD"
-  sex: Sex
+  birth: string | null
+  sex: Sex | null
   ido: number
   keido: number
 }
 
 const client = useSupabaseClient()
+
 const mapEl = ref<HTMLDivElement | null>(null)
+const loading = ref(false)
+const lastUpdated = ref<string | null>(null)
+const lastError = ref<string | null>(null)
+
+let map: L.Map | null = null
+let cluster: any = null // markerClusterGroup は型が弱いので any でOK
 
 const calcAge = (birthISO: string) => {
   const b = new Date(birthISO)
@@ -27,7 +35,7 @@ const calcAge = (birthISO: string) => {
 type AgeBand = "20s" | "30s" | "40s" | "50s" | "60p" | "u20"
 
 const ageBand = (age: number): AgeBand => {
-  if (age < 20) return "u20" // If you don't need it, you can remove it later
+  if (age < 20) return "u20"
   if (age < 30) return "20s"
   if (age < 40) return "30s"
   if (age < 50) return "40s"
@@ -35,61 +43,26 @@ const ageBand = (age: number): AgeBand => {
   return "60p"
 }
 
-// sex × age band → class name (10 categories)
-// e.g. pin male-20s, female-60p, etc.
-const pinClass = (sex: Sex, birthISO: string) => {
+const pinClass = (sex: Sex | null, birthISO: string | null) => {
+  const s: Sex = sex ?? "male"
+  if (!birthISO) return `${s}-20s`
   const band = ageBand(calcAge(birthISO))
-  // We want to focus on 20s–60+, so treat under-20 as 20s (change if you prefer)
   const normalized = band === "u20" ? "20s" : band
-  return `${sex}-${normalized}`
+  return `${s}-${normalized}`
 }
 
 const makeIcon = (cls: string) =>
   L.divIcon({
-    className: "", // Disable Leaflet's default class
+    className: "",
     html: `<div class="pin ${cls}"></div>`,
     iconSize: [24, 24],
     iconAnchor: [12, 24],
   })
 
-// (Optional) Seed test data: generate ~30 random records
-const seedCustomers = async (n = 30) => {
-  const user = useSupabaseUser()
-  if (!user.value) return
-
-  const baseLat = 33.5756
-  const baseLng = 130.3749
-
-  const rand = (min: number, max: number) => Math.random() * (max - min) + min
-  const randInt = (min: number, max: number) => Math.floor(rand(min, max + 1))
-
-  const randomBirth = () => {
-    // Roughly ages 20–75
-    const age = randInt(20, 75)
-    const year = new Date().getFullYear() - age
-    const month = randInt(1, 12)
-    const day = randInt(1, 28)
-    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`
-  }
-
-  const rows = Array.from({ length: n }).map((_, i) => ({
-    user_id: user.value!.id,
-    address: `Test address ${i + 1}`,
-    birth: randomBirth(),
-    sex: (Math.random() < 0.5 ? "male" : "female") as Sex,
-    ido: baseLat + rand(-0.03, 0.03), // Scatter around Fukuoka
-    keido: baseLng + rand(-0.03, 0.03),
-  }))
-
-  const { error } = await client.from("customer").insert(rows)
-  if (error) alert(error.message)
-  else alert(`Inserted ${n} test records`)
-}
-
-onMounted(async () => {
+const initMapOnce = () => {
   if (!mapEl.value) return
+  if (map) return
 
-  // Fix Leaflet default icon URLs (keep this for the default blue marker if needed)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   delete (L.Icon.Default.prototype as any)._getIconUrl
   L.Icon.Default.mergeOptions({
@@ -98,67 +71,107 @@ onMounted(async () => {
     shadowUrl: new URL("leaflet/dist/images/marker-shadow.png", import.meta.url).toString(),
   })
 
-  const map = L.map(mapEl.value, { zoomControl: true })
+  map = L.map(mapEl.value, { zoomControl: true })
 
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     attribution: "&copy; OpenStreetMap contributors",
   }).addTo(map)
 
-  // Fetch data first
-  const { data, error } = await client
-    .from("customer")
-    .select("id,address,birth,sex,ido,keido")
-    .order("id", { ascending: false })
+  // ✅ Cluster レイヤ
+  cluster = (L as any).markerClusterGroup({
+    spiderfyOnMaxZoom: true,
+    showCoverageOnHover: false,
+    maxClusterRadius: 40,
+  })
+  cluster.addTo(map)
 
-  if (error) {
-    console.error(error)
-    return
-  }
+  map.setView([33.5756, 130.3749], 12)
+  setTimeout(() => map?.invalidateSize(), 0)
+}
 
-  const customers = (data ?? []) as Customer[]
+const renderPins = (customers: Customer[]) => {
+  if (!map || !cluster) return
+
+  // ✅ 既存ピンを全部消す
+  cluster.clearLayers()
+
   if (customers.length === 0) {
-    // If there's no data, show around Ropponmatsu
-    map.setView([33.5756, 130.3749], 14)
-    setTimeout(() => map.invalidateSize(), 0)
+    map.setView([33.5756, 130.3749], 12)
     return
   }
 
-  // Add pins and fit the view to include all points
   const bounds = L.latLngBounds([])
+
   for (const c of customers) {
     const cls = pinClass(c.sex, c.birth)
     const icon = makeIcon(cls)
 
-    L.marker([c.ido, c.keido], { icon })
-      .addTo(map)
-      .bindPopup(`${c.address ?? "No address"}<br/>${c.sex} / ${calcAge(c.birth)} years old`)
+    const ageText = c.birth ? `${calcAge(c.birth)} yrs` : "age unknown"
+    const sexText = c.sex ?? "unknown"
+
+    const marker = L.marker([c.ido, c.keido], { icon }).bindPopup(
+      `${c.address ?? "No address"}<br/>${sexText} / ${ageText}`
+    )
+
+    // ✅ cluster に追加
+    cluster.addLayer(marker)
 
     bounds.extend([c.ido, c.keido])
   }
 
   map.fitBounds(bounds, { padding: [40, 40] })
-  setTimeout(() => map.invalidateSize(), 0)
+}
 
-  // Enable this if you want to seed without a button (optional)
-  // await seedCustomers(30)
+const loadCustomers = async () => {
+  initMapOnce()
+  if (!map) return
+
+  loading.value = true
+  lastError.value = null
+
+  try {
+    const { data, error } = await client
+      .from("customer")
+      .select("id,address,birth,sex,ido,keido")
+      .order("id", { ascending: false })
+
+    if (error) throw error
+
+    renderPins((data ?? []) as Customer[])
+    lastUpdated.value = new Date().toLocaleString()
+  } catch (e: any) {
+    console.error(e)
+    lastError.value = e?.message ?? String(e)
+  } finally {
+    loading.value = false
+    setTimeout(() => map?.invalidateSize(), 0)
+  }
+}
+
+onMounted(async () => {
+  await loadCustomers()
 })
 </script>
 
 <template>
   <div class="space-y-3">
-    <div class="flex gap-2">
+    <div class="flex flex-wrap items-center gap-2">
       <button
-        class="px-3 py-2 rounded-lg border bg-white text-sm hover:bg-slate-50"
-        @click="seedCustomers(30)"
+        class="px-3 py-2 rounded-lg border bg-white text-sm hover:bg-slate-50 disabled:opacity-50"
+        :disabled="loading"
+        @click="loadCustomers()"
       >
-        Insert 30 test records
+        {{ loading ? "Updating..." : "UPDATE" }}
       </button>
-      <button
-        class="px-3 py-2 rounded-lg border bg-white text-sm hover:bg-slate-50"
-        @click="location.reload()"
-      >
-        Reload
-      </button>
+
+      <div class="text-xs text-slate-600">
+        <span v-if="lastUpdated">Last updated: {{ lastUpdated }}</span>
+        <span v-else>Not updated yet</span>
+      </div>
+
+      <div v-if="lastError" class="w-full text-xs text-rose-600">
+        Error: {{ lastError }}
+      </div>
     </div>
 
     <div class="w-full h-[520px] rounded-xl overflow-hidden border border-slate-200 bg-white">
@@ -166,14 +179,13 @@ onMounted(async () => {
     </div>
 
     <div class="text-xs text-slate-600">
-      Color coding: Sex × Age band (20/30/40/50/60+)
+      Color: sex × age band (20/30/40/50/60+)
     </div>
   </div>
 </template>
 
-<!-- Important: do NOT use scoped here, because Leaflet's divIcon is rendered outside Vue's scope -->
 <style>
-/* Shared pin shape (CSS only, no CDN/images) */
+/* CSSピン（そのまま） */
 .pin {
   width: 16px;
   height: 16px;
@@ -193,18 +205,22 @@ onMounted(async () => {
   background: inherit;
 }
 
-/* 10 categories: male/female × 20s/30s/40s/50s/60p */
-/* Male: blue gradient */
-.pin.male-20s { background: #60a5fa; } /* blue-400 */
-.pin.male-30s { background: #3b82f6; } /* blue-500 */
-.pin.male-40s { background: #2563eb; } /* blue-600 */
-.pin.male-50s { background: #1d4ed8; } /* blue-700 */
-.pin.male-60p { background: #1e40af; } /* blue-800 */
+/* 男性：青系 */
+.pin.male-20s { background: #60a5fa; }
+.pin.male-30s { background: #3b82f6; }
+.pin.male-40s { background: #2563eb; }
+.pin.male-50s { background: #1d4ed8; }
+.pin.male-60p { background: #1e40af; }
 
-/* Female: pink gradient */
-.pin.female-20s { background: #f9a8d4; } /* pink-300 */
-.pin.female-30s { background: #f472b6; } /* pink-400 */
-.pin.female-40s { background: #ec4899; } /* pink-500 */
-.pin.female-50s { background: #db2777; } /* pink-600 */
-.pin.female-60p { background: #be185d; } /* pink-700 */
+/* 女性：ピンク系 */
+.pin.female-20s { background: #f9a8d4; }
+.pin.female-30s { background: #f472b6; }
+.pin.female-40s { background: #ec4899; }
+.pin.female-50s { background: #db2777; }
+.pin.female-60p { background: #be185d; }
+
+.leaflet-div-icon {
+  background: transparent !important;
+  border: none !important;
+}
 </style>

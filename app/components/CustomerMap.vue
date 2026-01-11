@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import L from "leaflet"
 import "leaflet.markercluster"
-import { onMounted, ref } from "vue"
+import { onMounted, ref, computed } from "vue"
 
 type Sex = "male" | "female"
 type Customer = {
@@ -13,6 +13,14 @@ type Customer = {
   keido: number
 }
 
+type JobStatus = "queued" | "processing" | "done" | "failed"
+type FailedJob = {
+  id: number
+  address: string | null
+  last_error: string | null
+  updated_at: string | null
+}
+
 const client = useSupabaseClient()
 
 const mapEl = ref<HTMLDivElement | null>(null)
@@ -20,8 +28,26 @@ const loading = ref(false)
 const lastUpdated = ref<string | null>(null)
 const lastError = ref<string | null>(null)
 
+const progress = ref({
+  total: 0,
+  queued: 0,
+  processing: 0,
+  done: 0,
+  failed: 0,
+  percent: 0, // (done+failed)/total
+  successRate: 0, // done/(done+failed)
+})
+
+const failedJobs = ref<FailedJob[]>([])
+const failedLoading = ref(false)
+
+const isCompleted = computed(() => {
+  const p = progress.value
+  return p.total > 0 && p.queued === 0 && p.processing === 0
+})
+
 let map: L.Map | null = null
-let cluster: any = null // markerClusterGroup は型が弱いので any でOK
+let cluster: any = null
 
 const calcAge = (birthISO: string) => {
   const b = new Date(birthISO)
@@ -33,7 +59,6 @@ const calcAge = (birthISO: string) => {
 }
 
 type AgeBand = "20s" | "30s" | "40s" | "50s" | "60p" | "u20"
-
 const ageBand = (age: number): AgeBand => {
   if (age < 20) return "u20"
   if (age < 30) return "20s"
@@ -77,7 +102,6 @@ const initMapOnce = () => {
     attribution: "&copy; OpenStreetMap contributors",
   }).addTo(map)
 
-  // ✅ Cluster レイヤ
   cluster = (L as any).markerClusterGroup({
     spiderfyOnMaxZoom: true,
     showCoverageOnHover: false,
@@ -92,7 +116,6 @@ const initMapOnce = () => {
 const renderPins = (customers: Customer[]) => {
   if (!map || !cluster) return
 
-  // ✅ 既存ピンを全部消す
   cluster.clearLayers()
 
   if (customers.length === 0) {
@@ -113,13 +136,50 @@ const renderPins = (customers: Customer[]) => {
       `${c.address ?? "No address"}<br/>${sexText} / ${ageText}`
     )
 
-    // ✅ cluster に追加
     cluster.addLayer(marker)
-
     bounds.extend([c.ido, c.keido])
   }
 
   map.fitBounds(bounds, { padding: [40, 40] })
+}
+
+const loadProgress = async () => {
+  const { data, error } = await client.from("customer_jobs").select("status")
+  if (error) throw error
+
+  const rows = (data ?? []) as Array<{ status: JobStatus }>
+  const counts = { queued: 0, processing: 0, done: 0, failed: 0 }
+
+  for (const r of rows) {
+    if (r.status === "queued") counts.queued++
+    else if (r.status === "processing") counts.processing++
+    else if (r.status === "done") counts.done++
+    else if (r.status === "failed") counts.failed++
+  }
+
+  const total = rows.length
+  const completed = counts.done + counts.failed
+  const percent = total === 0 ? 0 : Math.round((completed / total) * 100)
+  const successRate = completed === 0 ? 0 : Math.round((counts.done / completed) * 100)
+
+  progress.value = { total, ...counts, percent, successRate }
+}
+
+const loadFailedJobs = async (limit = 30) => {
+  failedLoading.value = true
+  try {
+    const { data, error } = await client
+      .from("customer_jobs")
+      .select("id,address,last_error,updated_at")
+      .eq("status", "failed")
+      .order("updated_at", { ascending: false })
+      .limit(limit)
+
+    if (error) throw error
+    failedJobs.value = (data ?? []) as FailedJob[]
+  } finally {
+    failedLoading.value = false
+  }
 }
 
 const loadCustomers = async () => {
@@ -130,14 +190,18 @@ const loadCustomers = async () => {
   lastError.value = null
 
   try {
+    // ✅ まず進捗＆failedを更新（“完了したか”もここで決まる）
+    await Promise.all([loadProgress(), loadFailedJobs(30)])
+
+    // ✅ そのあと地図（customer）を更新
     const { data, error } = await client
       .from("customer")
       .select("id,address,birth,sex,ido,keido")
       .order("id", { ascending: false })
 
     if (error) throw error
-
     renderPins((data ?? []) as Customer[])
+
     lastUpdated.value = new Date().toLocaleString()
   } catch (e: any) {
     console.error(e)
@@ -164,6 +228,14 @@ onMounted(async () => {
         {{ loading ? "Updating..." : "UPDATE" }}
       </button>
 
+      <!-- ✅ 完了表示 -->
+      <div
+        v-if="isCompleted"
+        class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700 border border-emerald-200"
+      >
+        COMPLETED
+      </div>
+
       <div class="text-xs text-slate-600">
         <span v-if="lastUpdated">Last updated: {{ lastUpdated }}</span>
         <span v-else>Not updated yet</span>
@@ -174,8 +246,68 @@ onMounted(async () => {
       </div>
     </div>
 
+    <!-- ✅ 進捗 -->
+    <div class="w-full max-w-3xl space-y-2">
+      <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
+        <div>
+          Progress:
+          <span class="font-medium text-slate-900">{{ progress.percent }}%</span>
+          <span class="ml-2">
+            Success:
+            <span class="font-medium text-slate-900">{{ progress.successRate }}%</span>
+          </span>
+        </div>
+
+        <div class="flex flex-wrap gap-2">
+          <span>queued {{ progress.queued }}</span>
+          <span>processing {{ progress.processing }}</span>
+          <span>done {{ progress.done }}</span>
+          <span>failed {{ progress.failed }}</span>
+          <span class="text-slate-400">total {{ progress.total }}</span>
+        </div>
+      </div>
+
+      <div class="h-2 w-full rounded-full bg-slate-200 overflow-hidden">
+        <div class="h-full bg-slate-800 transition-all" :style="{ width: progress.percent + '%' }" />
+      </div>
+    </div>
+
+    <!-- ✅ 地図 -->
     <div class="w-full h-[520px] rounded-xl overflow-hidden border border-slate-200 bg-white">
       <div ref="mapEl" class="w-full h-full"></div>
+    </div>
+
+    <!-- ✅ failed一覧 -->
+    <div class="rounded-xl border border-slate-200 bg-white p-4">
+      <div class="flex items-center justify-between">
+        <div class="text-sm font-medium text-slate-900">
+          Failed jobs
+          <span class="ml-2 text-xs text-slate-500">(latest 30)</span>
+        </div>
+        <div class="text-xs text-slate-500" v-if="failedLoading">Loading...</div>
+      </div>
+
+      <div v-if="failedJobs.length === 0" class="mt-3 text-sm text-slate-600">
+        No failed jobs 🎉
+      </div>
+
+      <ul v-else class="mt-3 space-y-2">
+        <li v-for="j in failedJobs" :key="j.id" class="rounded-lg border border-slate-200 p-3">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-sm font-medium text-slate-900 truncate">
+                #{{ j.id }} — {{ j.address ?? "No address" }}
+              </div>
+              <div class="mt-1 text-xs text-rose-700 break-words">
+                {{ j.last_error ?? "Unknown error" }}
+              </div>
+            </div>
+            <div class="shrink-0 text-xs text-slate-500">
+              {{ j.updated_at ? new Date(j.updated_at).toLocaleString() : "" }}
+            </div>
+          </div>
+        </li>
+      </ul>
     </div>
 
     <div class="text-xs text-slate-600">
@@ -185,7 +317,6 @@ onMounted(async () => {
 </template>
 
 <style>
-/* CSSピン（そのまま） */
 .pin {
   width: 16px;
   height: 16px;
@@ -205,14 +336,12 @@ onMounted(async () => {
   background: inherit;
 }
 
-/* 男性：青系 */
 .pin.male-20s { background: #60a5fa; }
 .pin.male-30s { background: #3b82f6; }
 .pin.male-40s { background: #2563eb; }
 .pin.male-50s { background: #1d4ed8; }
 .pin.male-60p { background: #1e40af; }
 
-/* 女性：ピンク系 */
 .pin.female-20s { background: #f9a8d4; }
 .pin.female-30s { background: #f472b6; }
 .pin.female-40s { background: #ec4899; }

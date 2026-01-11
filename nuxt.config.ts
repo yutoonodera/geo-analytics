@@ -29,4 +29,9 @@ export default defineNuxtConfig({
         "leaflet.markercluster/dist/MarkerCluster.css",
         "leaflet.markercluster/dist/MarkerCluster.Default.css",
   ],
+  vite: {
+    server: {
+      allowedHosts: ["nuxt"],
+    },
+  },
 })

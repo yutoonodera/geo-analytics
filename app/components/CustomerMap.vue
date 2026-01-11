@@ -46,6 +46,12 @@ const isCompleted = computed(() => {
   return p.total > 0 && p.queued === 0 && p.processing === 0
 })
 
+// ✅ 追加：途中（処理中）判定
+const isRunning = computed(() => {
+  const p = progress.value
+  return p.total > 0 && (p.queued > 0 || p.processing > 0)
+})
+
 let map: L.Map | null = null
 let cluster: any = null
 
@@ -190,10 +196,8 @@ const loadCustomers = async () => {
   lastError.value = null
 
   try {
-    // ✅ まず進捗＆failedを更新（“完了したか”もここで決まる）
     await Promise.all([loadProgress(), loadFailedJobs(30)])
 
-    // ✅ そのあと地図（customer）を更新
     const { data, error } = await client
       .from("customer")
       .select("id,address,birth,sex,ido,keido")
@@ -228,86 +232,95 @@ onMounted(async () => {
         {{ loading ? "Updating..." : "UPDATE" }}
       </button>
 
-      <!-- ✅ 完了表示 -->
+      <!-- ✅ バッジ：完了なら COMPLETED / 途中なら PROGRESS xx% -->
       <div
-        v-if="isCompleted"
-        class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700 border border-emerald-200"
+        v-if="progress.total > 0"
+        class="inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium"
+        :class="isCompleted
+          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+          : 'bg-slate-50 text-slate-700 border-slate-200'"
       >
-        COMPLETED
+        <span v-if="isCompleted">COMPLETED</span>
+        <span v-else>PROGRESS {{ progress.percent }}%</span>
+        <span class="ml-2 text-[11px] text-slate-500">
+          ({{ progress.done + progress.failed }}/{{ progress.total }})
+        </span>
       </div>
 
-      <div class="text-xs text-slate-600">
+      <div class="text-xs text-slate-500">
         <span v-if="lastUpdated">Last updated: {{ lastUpdated }}</span>
         <span v-else>Not updated yet</span>
       </div>
+
+    <!-- ✅ details は常に表示（小さく、補助情報） -->
+<details class="ml-auto">
+  <summary
+    class="cursor-pointer select-none rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-500 hover:text-slate-700"
+  >
+    Details
+    <span v-if="progress.failed > 0" class="ml-1">/ Issues {{ progress.failed }}</span>
+  </summary>
+
+  <div class="mt-2 w-[min(520px,90vw)] rounded-lg border border-slate-200 bg-white p-3">
+    <div class="flex items-center justify-between">
+      <div class="text-xs font-medium text-slate-700">Job metrics</div>
+      <div v-if="failedLoading" class="text-[11px] text-slate-400">Loading...</div>
+    </div>
+
+    <div class="mt-2 text-[11px] text-slate-500 flex flex-wrap gap-2">
+      <span>progress {{ progress.percent }}%</span>
+      <span>success {{ progress.successRate }}%</span>
+      <span>queued {{ progress.queued }}</span>
+      <span>processing {{ progress.processing }}</span>
+      <span>done {{ progress.done }}</span>
+      <span>failed {{ progress.failed }}</span>
+      <span class="text-slate-400">total {{ progress.total }}</span>
+    </div>
+
+    <div v-if="progress.failed === 0" class="mt-3 text-[11px] text-slate-400">
+      No failed jobs.
+    </div>
+
+    <ul v-else class="mt-3 space-y-2">
+      <li
+        v-for="j in failedJobs"
+        :key="j.id"
+        class="rounded-md border border-slate-100 bg-slate-50 p-2"
+      >
+        <div class="text-[11px] font-medium text-slate-800 truncate">
+          #{{ j.id }} — {{ j.address ?? "No address" }}
+        </div>
+        <div class="mt-1 text-[11px] text-rose-700 break-words">
+          {{ j.last_error ?? "Unknown error" }}
+        </div>
+        <div class="mt-1 text-[10px] text-slate-400">
+          {{ j.updated_at ? new Date(j.updated_at).toLocaleString() : "" }}
+        </div>
+      </li>
+    </ul>
+  </div>
+</details>
+
 
       <div v-if="lastError" class="w-full text-xs text-rose-600">
         Error: {{ lastError }}
       </div>
     </div>
 
-    <!-- ✅ 進捗 -->
-    <div class="w-full max-w-3xl space-y-2">
-      <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
-        <div>
-          Progress:
-          <span class="font-medium text-slate-900">{{ progress.percent }}%</span>
-          <span class="ml-2">
-            Success:
-            <span class="font-medium text-slate-900">{{ progress.successRate }}%</span>
-          </span>
-        </div>
-
-        <div class="flex flex-wrap gap-2">
-          <span>queued {{ progress.queued }}</span>
-          <span>processing {{ progress.processing }}</span>
-          <span>done {{ progress.done }}</span>
-          <span>failed {{ progress.failed }}</span>
-          <span class="text-slate-400">total {{ progress.total }}</span>
-        </div>
-      </div>
-
-      <div class="h-2 w-full rounded-full bg-slate-200 overflow-hidden">
-        <div class="h-full bg-slate-800 transition-all" :style="{ width: progress.percent + '%' }" />
-      </div>
+    <!-- ✅ 進捗バー：未完了のときだけ表示（単色ピンク） -->
+    <div
+      v-if="!isCompleted && progress.total > 0"
+      class="relative h-3 w-full overflow-hidden rounded-full bg-slate-200"
+    >
+      <div
+        class="h-full rounded-full bg-pink-400 transition-all duration-500"
+        :style="{ width: progress.percent + '%' }"
+      />
     </div>
 
-    <!-- ✅ 地図 -->
+
     <div class="w-full h-[520px] rounded-xl overflow-hidden border border-slate-200 bg-white">
       <div ref="mapEl" class="w-full h-full"></div>
-    </div>
-
-    <!-- ✅ failed一覧 -->
-    <div class="rounded-xl border border-slate-200 bg-white p-4">
-      <div class="flex items-center justify-between">
-        <div class="text-sm font-medium text-slate-900">
-          Failed jobs
-          <span class="ml-2 text-xs text-slate-500">(latest 30)</span>
-        </div>
-        <div class="text-xs text-slate-500" v-if="failedLoading">Loading...</div>
-      </div>
-
-      <div v-if="failedJobs.length === 0" class="mt-3 text-sm text-slate-600">
-        No failed jobs 🎉
-      </div>
-
-      <ul v-else class="mt-3 space-y-2">
-        <li v-for="j in failedJobs" :key="j.id" class="rounded-lg border border-slate-200 p-3">
-          <div class="flex items-start justify-between gap-3">
-            <div class="min-w-0">
-              <div class="text-sm font-medium text-slate-900 truncate">
-                #{{ j.id }} — {{ j.address ?? "No address" }}
-              </div>
-              <div class="mt-1 text-xs text-rose-700 break-words">
-                {{ j.last_error ?? "Unknown error" }}
-              </div>
-            </div>
-            <div class="shrink-0 text-xs text-slate-500">
-              {{ j.updated_at ? new Date(j.updated_at).toLocaleString() : "" }}
-            </div>
-          </div>
-        </li>
-      </ul>
     </div>
 
     <div class="text-xs text-slate-600">
@@ -352,4 +365,20 @@ onMounted(async () => {
   background: transparent !important;
   border: none !important;
 }
+
+/* ===== Progress bar animation (UPLOAD中だけ) ===== */
+
+/* 斜めストライプが流れる */
+.progress-stripes {
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(255,255,255,0.45) 0,
+    rgba(255,255,255,0.45) 10px,
+    rgba(255,255,255,0.15) 10px,
+    rgba(255,255,255,0.15) 20px
+  );
+  background-size: 40px 40px;
+  animation: stripes-move 0.9s linear infinite;
+}
+
 </style>

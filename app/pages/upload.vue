@@ -1,6 +1,21 @@
 <script setup lang="ts">
 import Papa from "papaparse"
 
+// =============================
+// Auth（このページでは「弾く」だけ）
+// =============================
+const user = useSupabaseUser()
+const route = useRoute()
+
+watchEffect(() => {
+  if (user.value === null) {
+    navigateTo(`/login?redirect=${route.fullPath}`)
+  }
+})
+
+// =============================
+// CSV Upload
+// =============================
 type Row = {
   address: string
   birth?: string
@@ -20,7 +35,7 @@ const onFile = (e: Event) => {
 const parseCsv = async (f: File) => {
   return await new Promise<Row[]>((resolve, reject) => {
     Papa.parse(f, {
-      header: true, // 1行目をヘッダーとして読む
+      header: true,
       skipEmptyLines: true,
       complete: (results) => {
         const rows = (results.data as any[]).map((r) => ({
@@ -47,7 +62,6 @@ const upload = async () => {
       return
     }
 
-    // jobs に投入
     const res = await $fetch<{
       ok: boolean
       inserted: number
@@ -69,6 +83,9 @@ const upload = async () => {
 
 <template>
   <div class="p-6 max-w-2xl space-y-4">
+    <!-- ✅ 共通 UserBar -->
+    <UserBar />
+
     <h1 class="text-xl font-semibold">CSV Upload → customer_jobs</h1>
 
     <div class="rounded-xl border bg-white p-4 space-y-3">

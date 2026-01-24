@@ -13,7 +13,6 @@ const normalizeSex = (v: unknown): Sex | null => {
 
 const normalizeBirth = (v: unknown): string | null => {
   const s = String(v ?? "").trim()
-  // YYYY-MM-DD 以外は null に落とす（必要ならここで変換も可能）
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
   return null
 }
@@ -23,11 +22,10 @@ export default defineEventHandler(async (event) => {
 
   const supabase = await serverSupabaseClient(event)
 
-const user = await serverSupabaseUser(event) as any
-const userId: string | undefined = user?.id ?? user?.sub
+  const user = (await serverSupabaseUser(event)) as any
+  const userId: string | undefined = user?.id ?? user?.sub
 
   if (!userId) {
-    console.error("Unauthorized: no userId. user =", user)
     throw createError({ statusCode: 401, statusMessage: "Unauthorized" })
   }
 
@@ -39,26 +37,28 @@ const userId: string | undefined = user?.id ?? user?.sub
 
   const LIMIT = 200
 
-  // queued + processing を “実データで” 数える（LIMIT=200ならこれで十分高速）
-  const { data: existing, error: selErr } = await supabase
-    .from("customer_jobs")
-    .select("id")
-    .eq("user_id", userId)
-    .in("status", ["queued", "processing"])
-    .limit(LIMIT + 1)
+  // ✅ 今月の期間 [start, next)
+  const now = new Date()
+  const start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0)
+  const next = new Date(now.getFullYear(), now.getMonth() + 1, 1, 0, 0, 0, 0)
 
-  if (selErr) {
-    console.error("SELECT ERROR FULL:", JSON.stringify(selErr, null, 2))
-    throw createError({ statusCode: 500, statusMessage: selErr.message || "select failed" })
+  // ✅ 今月作られた件数（status無関係）
+  const { count: usedCount, error: countErr } = await supabase
+    .from("customer_jobs")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", userId)
+    .gte("created_at", start.toISOString())
+    .lt("created_at", next.toISOString())
+
+  if (countErr) {
+    console.error("COUNT ERROR FULL:", JSON.stringify(countErr, null, 2))
+    throw createError({ statusCode: 500, statusMessage: countErr.message || "count failed" })
   }
 
-  const current = existing?.length ?? 0
-  const remaining = LIMIT - current
+  const used = usedCount ?? 0
+  const remaining = LIMIT - used
   if (remaining <= 0) {
-    throw createError({
-      statusCode: 429,
-      statusMessage: `Queue limit reached (${LIMIT}).`,
-    })
+    throw createError({ statusCode: 429, statusMessage: `Monthly limit reached (${LIMIT}).` })
   }
 
   // normalize + filter (address必須)
@@ -74,19 +74,20 @@ const userId: string | undefined = user?.id ?? user?.sub
     throw createError({ statusCode: 400, statusMessage: "No valid rows (address is empty)" })
   }
 
+  // ✅ 月の残り枠ぶんだけ投入
   const toInsert = normalized.slice(0, remaining).map((r) => ({
     user_id: userId,
     address: r.address,
-    birth: r.birth, // null or YYYY-MM-DD
-    sex: r.sex,     // null or male/female
+    birth: r.birth,
+    sex: r.sex,
     status: "queued" as const,
   }))
 
-  console.log("toInsert sample:", toInsert[0])
+  const skipped = normalized.length - toInsert.length
 
   const { data, error: insErr } = await supabase
     .from("customer_jobs")
-    .insert(toInsert as any) // 型生成してない間は any でOK
+    .insert(toInsert as any)
     .select("id")
 
   if (insErr) {
@@ -96,10 +97,13 @@ const userId: string | undefined = user?.id ?? user?.sub
 
   console.log("inserted ids (first 3):", data?.slice?.(0, 3))
 
+  // ✅ フロントがそのまま更新できる値を返す
   return {
     ok: true,
     inserted: toInsert.length,
-    skipped: normalized.length - toInsert.length,
+    skipped,
     limit: LIMIT,
+    used: used + toInsert.length,
+    remaining: Math.max(0, remaining - toInsert.length),
   }
 })
